@@ -22,6 +22,7 @@ import {
   type DeviceMode,
   type GeneratedCodeFile,
 } from "./lib/generator";
+import { deleteStoredProject, loadProjects, projectStoreMode, upsertProject } from "./lib/projectStore";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type BuildView  = "preview" | "code" | "deployed";
@@ -787,6 +788,7 @@ export default function App() {
   const [folders] = useState<ProjectFolder[]>(PROJECT_FOLDERS);
   const [projects, setProjects] = useState<BuilderProject[]>(INIT_PROJECTS);
   const [activeProjectId, setActiveProjectId] = useState(INIT_PROJECTS[0].id);
+  const [storageStatus, setStorageStatus] = useState(`${projectStoreMode()} storage`);
 
   const messagesEndRef  = useRef<HTMLDivElement>(null);
   const fileInputRef    = useRef<HTMLInputElement>(null);
@@ -802,6 +804,27 @@ export default function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior:"smooth" });
   }, [messages, isTyping]);
+
+  useEffect(() => {
+    let mounted = true;
+    loadProjects(INIT_PROJECTS)
+      .then(savedProjects => {
+        if (!mounted || savedProjects.length===0) return;
+        const [first] = savedProjects;
+        setProjects(savedProjects);
+        setActiveProjectId(first.id);
+        setLastPrompt(first.prompt);
+        setStyleSeed(first.styleSeed);
+        setHistory([first.prompt]);
+        setHistoryIdx(0);
+        setStorageStatus(`${projectStoreMode()} connected`);
+      })
+      .catch(error => {
+        console.warn("Project storage load failed.", error);
+        setStorageStatus("Local fallback");
+      });
+    return () => { mounted = false; };
+  }, []);
 
   // Instant live preview - generate a style pack from typed input
   useEffect(() => {
@@ -821,7 +844,13 @@ export default function App() {
   const activeCaps        = capabilities.filter(c=>c.active).length;
 
   function writeProject(update: Partial<BuilderProject>, projectId = activeProjectId) {
-    setProjects(p=>p.map(project=>project.id===projectId ? { ...project, ...update, updatedAt:new Date() } : project));
+    const existing = projects.find(project=>project.id===projectId);
+    if (!existing) return;
+    const changed = { ...existing, ...update, updatedAt:new Date() };
+    setProjects(p=>p.map(project=>project.id===projectId ? changed : project));
+    upsertProject(changed)
+      .then(()=>setStorageStatus(`${projectStoreMode()} saved`))
+      .catch(()=>setStorageStatus("Local saved"));
   }
 
   function markDirty(status: BuildStatus = "Preview updated") {
@@ -831,6 +860,13 @@ export default function App() {
 
   function saveProject() {
     const now = new Date();
+    const savedProject = {
+      ...activeProject,
+      prompt:lastPrompt,
+      styleSeed,
+      updatedAt:now,
+      savedAt:now,
+    };
     setProjects(p=>p.map(project=>project.id===activeProjectId ? {
       ...project,
       prompt:lastPrompt,
@@ -838,6 +874,9 @@ export default function App() {
       updatedAt:now,
       savedAt:now,
     } : project));
+    upsertProject(savedProject)
+      .then(()=>setStorageStatus(`${projectStoreMode()} saved`))
+      .catch(()=>setStorageStatus("Local saved"));
     setAutosaved(true);
     setBuildStatus("Saved");
     setTimeout(()=>setBuildStatus("Ready"), 1000);
@@ -871,6 +910,9 @@ export default function App() {
       savedAt:now,
     };
     setProjects(p=>[project, ...p]);
+    upsertProject(project)
+      .then(()=>setStorageStatus(`${projectStoreMode()} saved`))
+      .catch(()=>setStorageStatus("Local saved"));
     setActiveProjectId(id);
     setLastPrompt(project.prompt);
     setStyleSeed(project.styleSeed);
@@ -894,6 +936,9 @@ export default function App() {
       pinned:false,
     };
     setProjects(p=>[copy, ...p]);
+    upsertProject(copy)
+      .then(()=>setStorageStatus(`${projectStoreMode()} saved`))
+      .catch(()=>setStorageStatus("Local saved"));
     setActiveProjectId(copy.id);
     setLastPrompt(copy.prompt);
     setStyleSeed(copy.styleSeed);
@@ -908,6 +953,9 @@ export default function App() {
     if (projects.length===1) return;
     const remaining = projects.filter(p=>p.id!==id);
     setProjects(remaining);
+    deleteStoredProject(id)
+      .then(()=>setStorageStatus(`${projectStoreMode()} deleted`))
+      .catch(()=>setStorageStatus("Local saved"));
     if (id===activeProjectId) {
       const next = remaining[0];
       setActiveProjectId(next.id);
@@ -944,6 +992,10 @@ export default function App() {
         updatedAt:now,
         savedAt:now,
       } : project));
+      const nextProject = { ...activeProject, prompt:lastPrompt, styleSeed, updatedAt:now, savedAt:now };
+      upsertProject(nextProject)
+        .then(()=>setStorageStatus(`${projectStoreMode()} autosaved`))
+        .catch(()=>setStorageStatus("Local autosaved"));
       setAutosaved(true);
       setBuildStatus(current=>current==="Generating" ? current : "Autosaved");
       setTimeout(()=>setBuildStatus(current=>current==="Autosaved" ? "Ready" : current), 900);
@@ -1412,6 +1464,7 @@ export default function App() {
               <span style={{ fontFamily:"DM Mono,monospace", fontSize:9, color:activeFolder.color, fontWeight:700 }}>{activeFolder.name}</span>
               <span style={{ fontFamily:"DM Mono,monospace", fontSize:9, color:"var(--muted-foreground)" }}>· {activeProject?.name}</span>
               <span style={{ fontFamily:"DM Mono,monospace", fontSize:9, color:"var(--accent)", fontWeight:600 }}>{selectedModel}</span>
+              <span style={{ fontSize:9, color:"var(--muted-foreground)", fontFamily:"DM Mono,monospace" }}>· {storageStatus}</span>
               <span style={{ fontSize:9, color:"var(--muted-foreground)", fontFamily:"DM Mono,monospace" }}>· {buildStatus}</span>
               {[
                 { count:activeConnectors, label:"Connector" },
